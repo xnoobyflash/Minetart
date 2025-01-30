@@ -1,213 +1,166 @@
-// Luanti
-// SPDX-License-Identifier: LGPL-2.1-or-later
-// Copyright (C) 2010-2013 celeron55, Perttu Ahola <celeron55@gmail.com>
+/*
+This file is a part of the JThread package, which contains some object-
+oriented thread wrappers for different thread implementations.
+
+Copyright (c) 2000-2006  Jori Liesenborgs (jori.liesenborgs@gmail.com)
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+*/
 
 #pragma once
 
-#include "irrlichttypes.h"
-#include "threading/thread.h"
-#include "threading/mutex_auto_lock.h"
-#include "porting.h"
-#include "log.h"
-#include "container.h"
+#include "util/basic_macros.h"
 
-template<typename T>
-class MutexedVariable
-{
-public:
-	MutexedVariable(const T &value):
-		m_value(value)
-	{}
+#include <string>
+#include <atomic>
+#include <thread>
+#include <mutex>
 
-	T get()
-	{
-		MutexAutoLock lock(m_mutex);
-		return m_value;
-	}
+#ifdef _AIX
+	#include <sys/thread.h> // for tid_t
+#endif
 
-	void set(const T &value)
-	{
-		MutexAutoLock lock(m_mutex);
-		m_value = value;
-	}
-
-	// You pretty surely want to grab the lock when accessing this
-	T m_value;
-private:
-	std::mutex m_mutex;
-};
+#ifdef __HAIKU__
+	#include <kernel/OS.h>
+#endif
 
 /*
-	A single worker thread - multiple client threads queue framework.
-*/
-template<typename Key, typename T, typename Caller, typename CallerData>
-class GetResult {
-public:
-	Key key;
-	T item;
-	std::pair<Caller, CallerData> caller;
-};
-
-template<typename Key, typename T, typename Caller, typename CallerData>
-class ResultQueue : public MutexedQueue<GetResult<Key, T, Caller, CallerData> > {
-};
-
-template<typename Caller, typename Data, typename Key, typename T>
-class CallerInfo {
-public:
-	Caller caller;
-	Data data;
-	ResultQueue<Key, T, Caller, Data> *dest;
-};
-
-template<typename Key, typename T, typename Caller, typename CallerData>
-class GetRequest {
-public:
-	GetRequest() = default;
-	~GetRequest() = default;
-
-	GetRequest(const Key &a_key): key(a_key)
-	{
-	}
-
-	Key key;
-	std::list<CallerInfo<Caller, CallerData, Key, T> > callers;
-};
-
-/**
- * Notes for RequestQueue usage
- * @param Key unique key to identify a request for a specific resource
- * @param T ?
- * @param Caller unique id of calling thread
- * @param CallerData data passed back to caller
+ * On platforms using pthreads, these five priority classes correlate to
+ * even divisions between the minimum and maximum reported thread priority.
  */
-template<typename Key, typename T, typename Caller, typename CallerData>
-class RequestQueue {
+#if !defined(_WIN32)
+	#define THREAD_PRIORITY_LOWEST       0
+	#define THREAD_PRIORITY_BELOW_NORMAL 1
+	#define THREAD_PRIORITY_NORMAL       2
+	#define THREAD_PRIORITY_ABOVE_NORMAL 3
+	#define THREAD_PRIORITY_HIGHEST      4
+#endif
+
+
+
+class Thread {
 public:
-	bool empty()
-	{
-		return m_queue.empty();
-	}
+	Thread(const std::string &name="");
+	virtual ~Thread();
+	DISABLE_CLASS_COPY(Thread)
+	// Note: class cannot be moved since other references exist
 
-	void add(const Key &key, Caller caller, CallerData callerdata,
-		ResultQueue<Key, T, Caller, CallerData> *dest)
-	{
-		typename std::deque<GetRequest<Key, T, Caller, CallerData> >::iterator i;
-		typename std::list<CallerInfo<Caller, CallerData, Key, T> >::iterator j;
+	/*
+	 * Begins execution of a new thread at the pure virtual method Thread::run().
+	 * Execution of the thread is guaranteed to have started after this function
+	 * returns.
+	 */
+	bool start();
 
-		{
-			MutexAutoLock lock(m_queue.getMutex());
+	/*
+	 * Requests that the thread exit gracefully.
+	 * Returns immediately; thread execution is guaranteed to be complete after
+	 * a subsequent call to Thread::wait.
+	 */
+	bool stop();
 
-			/*
-				If the caller is already on the list, only update CallerData
-			*/
-			for (i = m_queue.getQueue().begin(); i != m_queue.getQueue().end(); ++i) {
-				GetRequest<Key, T, Caller, CallerData> &request = *i;
-				if (request.key != key)
-					continue;
+	/*
+	 * Waits for thread to finish.
+	 * Note:  This does not stop a thread, you have to do this on your own.
+	 * Returns false immediately if the thread is not started or has been waited
+	 * on before.
+	 */
+	bool wait();
 
-				for (j = request.callers.begin(); j != request.callers.end(); ++j) {
-					CallerInfo<Caller, CallerData, Key, T> &ca = *j;
-					if (ca.caller == caller) {
-						ca.data = callerdata;
-						return;
-					}
-				}
+	/*
+	 * Returns true if the calling thread is this Thread object.
+	 */
+	bool isCurrentThread() { return std::this_thread::get_id() == getThreadId(); }
 
-				CallerInfo<Caller, CallerData, Key, T> ca;
-				ca.caller = caller;
-				ca.data = callerdata;
-				ca.dest = dest;
-				request.callers.push_back(ca);
-				return;
-			}
-		}
+	bool isRunning() { return m_running; }
+	bool stopRequested() { return m_request_stop; }
 
-		/*
-			Else add a new request to the queue
-		*/
+	std::thread::id getThreadId() { return m_thread_obj->get_id(); }
 
-		GetRequest<Key, T, Caller, CallerData> request;
-		request.key = key;
-		CallerInfo<Caller, CallerData, Key, T> ca;
-		ca.caller = caller;
-		ca.data = callerdata;
-		ca.dest = dest;
-		request.callers.push_back(ca);
+	/*
+	 * Gets the thread return value.
+	 * Returns true if the thread has exited and the return value was available,
+	 * or false if the thread has yet to finish.
+	 */
+	bool getReturnValue(void **ret);
 
-		m_queue.push_back(request);
-	}
+	/*
+	 * Binds (if possible, otherwise sets the affinity of) the thread to the
+	 * specific processor specified by proc_number.
+	 */
+	bool bindToProcessor(unsigned int proc_number);
 
-	GetRequest<Key, T, Caller, CallerData> pop(unsigned int timeout_ms)
-	{
-		return m_queue.pop_front(timeout_ms);
-	}
+	/*
+	 * Sets the thread priority to the specified priority.
+	 *
+	 * prio can be one of: THREAD_PRIORITY_LOWEST, THREAD_PRIORITY_BELOW_NORMAL,
+	 * THREAD_PRIORITY_NORMAL, THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_HIGHEST.
+	 * On Windows, any of the other priorites as defined by SetThreadPriority
+	 * are supported as well.
+	 *
+	 * Note that it may be necessary to first set the threading policy or
+	 * scheduling algorithm to one that supports thread priorities if not
+	 * supported by default, otherwise this call will have no effect.
+	 */
+	bool setPriority(int prio);
 
-	GetRequest<Key, T, Caller, CallerData> pop()
-	{
-		return m_queue.pop_frontNoEx();
-	}
+	/*
+	 * Returns the thread object of the current thread if it exists.
+	 */
+	static Thread *getCurrentThread();
 
-	void pushResult(GetRequest<Key, T, Caller, CallerData> req, T res)
-	{
-		for (typename std::list<CallerInfo<Caller, CallerData, Key, T> >::iterator
-				i = req.callers.begin();
-				i != req.callers.end(); ++i) {
-			CallerInfo<Caller, CallerData, Key, T> &ca = *i;
+	/*
+	 * Sets the currently executing thread's name to where supported; useful
+	 * for debugging.
+	 */
+	static void setName(const std::string &name);
 
-			GetResult<Key,T,Caller,CallerData> result;
-
-			result.key = req.key;
-			result.item = res;
-			result.caller.first = ca.caller;
-			result.caller.second = ca.data;
-
-			ca.dest->push_back(result);
-		}
-	}
-
-private:
-	MutexedQueue<GetRequest<Key, T, Caller, CallerData> > m_queue;
-};
-
-class UpdateThread : public Thread
-{
-public:
-	UpdateThread(const std::string &name) : Thread(name + "Update") {}
-	~UpdateThread() = default;
-
-	void deferUpdate() { m_update_sem.post(); }
-
-	void stop()
-	{
-		Thread::stop();
-
-		// give us a nudge
-		m_update_sem.post();
-	}
-
-	void *run()
-	{
-		BEGIN_DEBUG_EXCEPTION_HANDLER
-
-		while (!stopRequested()) {
-			m_update_sem.wait();
-			// Set semaphore to 0
-			while (m_update_sem.wait(0));
-
-			if (stopRequested()) break;
-
-			doUpdate();
-		}
-
-		END_DEBUG_EXCEPTION_HANDLER
-
-		return NULL;
-	}
+	/*
+	 * Returns the number of processors/cores configured and active on this machine.
+	 */
+	static unsigned int getNumberOfProcessors();
 
 protected:
-	virtual void doUpdate() = 0;
+	std::string m_name;
+
+	virtual void *run() = 0;
 
 private:
-	Semaphore m_update_sem;
+	std::thread::native_handle_type getThreadHandle()
+		{ return m_thread_obj->native_handle(); }
+
+	static void threadProc(Thread *thr);
+
+	void *m_retval = nullptr;
+	bool m_joinable = false;
+	std::atomic<bool> m_request_stop;
+	std::atomic<bool> m_running;
+	std::mutex m_mutex;
+	std::mutex m_start_finished_mutex;
+
+	std::thread *m_thread_obj = nullptr;
+
+
+#ifdef _AIX
+	// For AIX, there does not exist any mapping from pthread_t to tid_t
+	// available to us, so we maintain one ourselves.  This is set on thread start.
+	tid_t m_kernel_thread_id;
+#endif
 };
+
